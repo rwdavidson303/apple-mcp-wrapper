@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apple-mcp-wrapper"
+version = "0.1.0"
+description = "MCP server adding Apple Music catalog search and catalog-track-add on top of the existing apple-music MCP"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Richard W. Davidson" }]
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+apple-mcp-wrapper = "apple_mcp_wrapper.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
