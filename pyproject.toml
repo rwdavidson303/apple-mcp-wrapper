@@ -21,4 +21,4 @@ dev = ["pytest>=7.0"]
 apple-mcp-wrapper = "apple_mcp_wrapper.server:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+include = ["apple_mcp_wrapper*"]
