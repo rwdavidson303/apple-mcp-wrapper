@@ -1,14 +1,20 @@
-"""Apple Music catalog search via the public iTunes Search API.
+"""Apple Music catalog search.
 
-No authentication required. Returns track metadata including the
-`trackViewUrl` which is the canonical Apple Music page URL for the track.
+Primary path uses MusicKit's /v1/catalog/{storefront}/search (full catalog,
+requires auth). The iTunes Search API `search()` helper is kept as a
+no-auth fallback, but `find_best_match()` now uses MusicKit exclusively
+and enforces a title-similarity check so it returns None instead of an
+unrelated song when the requested track isn't found.
 """
 from __future__ import annotations
 
+import difflib
 import json
 import urllib.parse
 import urllib.request
 from typing import Optional
+
+from . import musickit
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 
@@ -43,15 +49,13 @@ def search(query: str, limit: int = 10, country: str = "us") -> list[dict]:
 
 
 def _normalize(s: str) -> str:
-    return (
-        s.lower()
-        .replace(".", "")
-        .replace("'", "")
-        .replace("-", " ")
-        .replace("(", "")
-        .replace(")", "")
-        .strip()
-    )
+    s = s.lower()
+    for ch in "'’`":
+        s = s.replace(ch, "")
+    for ch in ".,;:!?/()[]{}\"":
+        s = s.replace(ch, " ")
+    s = s.replace("-", " ").replace("&", "and")
+    return " ".join(s.split())
 
 
 _COMPILATION_HINTS = (
@@ -68,62 +72,149 @@ _COMPILATION_HINTS = (
 )
 
 
+_TITLE_SIM_THRESHOLD = 0.72
+
+
+def _title_similar(target: str, candidate: str) -> bool:
+    """True if candidate title is plausibly the same song as target.
+
+    Rules:
+      1. Identical normalized forms: pass.
+      2. SequenceMatcher ratio >= 0.72: pass (catches spelling variants
+         like Freddie's/Freddy's, case/punctuation differences).
+      3. Substring match: pass only if the shorter normalized string is
+         at least 7 chars and contains at least 2 words. This prevents
+         single-word substrings like "You" matching "Who Is He (And What
+         Is He to You)".
+      4. Otherwise: fail.
+    """
+    a = _normalize(target)
+    b = _normalize(candidate)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if difflib.SequenceMatcher(None, a, b).ratio() >= _TITLE_SIM_THRESHOLD:
+        return True
+    if a in b or b in a:
+        shorter = a if len(a) < len(b) else b
+        if len(shorter) >= 7 and len(shorter.split()) >= 2:
+            return True
+    return False
+
+
+def _song_to_legacy_shape(r: dict) -> dict:
+    """Return a MusicKit song resource in the iTunes-Search-API-style dict
+    keys that the rest of this codebase already consumes."""
+    a = r.get("attributes", {})
+    return {
+        "trackName": a.get("name", ""),
+        "artistName": a.get("artistName", ""),
+        "collectionName": a.get("albumName", ""),
+        "trackViewUrl": a.get("url", ""),
+        "trackId": r.get("id", ""),
+        "previewUrl": (a.get("previews") or [{}])[0].get("url", ""),
+    }
+
+
 def find_best_match(
     artist: str,
     title: str,
     limit: int = 25,
     country: str = "us",
 ) -> Optional[dict]:
-    """Search for a specific artist + title and return the closest catalog match.
+    """Search the Apple Music catalog for a specific artist + title.
 
-    Preference tiers:
-      1. Exact artist match (case/punctuation-insensitive), not a compilation.
-      2. Exact artist match, compilation ok.
-      3. Artist first-token present in result's artistName, not a compilation.
-      4. Fallback: top raw result.
+    Requires that the returned song's title is plausibly similar to the
+    requested title. If no result passes the similarity check, returns
+    None (rather than a random song by the same artist, which is what
+    the previous iTunes-Search-API-based matcher did).
 
-    Within a tier, prefer the shortest track title (to avoid live / extended /
-    remix cuts when the canonical studio version exists).
+    Preference tiers (within titles that pass similarity):
+      1. Exact normalized artist match, non-compilation album, exact title.
+      2. Exact normalized artist match, non-compilation album.
+      3. Exact normalized artist match, compilation ok.
+      4. Artist first-token contained in result's artistName, non-compilation.
+      5. Top remaining viable result.
     """
-    results = search(f"{artist} {title}", limit=limit, country=country)
+    results = musickit.catalog_search_songs(
+        f"{artist} {title}", limit=limit, storefront=country
+    )
     if not results:
         return None
 
+    viable = [
+        r
+        for r in results
+        if _title_similar(title, r.get("attributes", {}).get("name", ""))
+    ]
+    if not viable:
+        return None
+
     artist_n = _normalize(artist)
-    artist_tokens = artist_n.split()
-    if not artist_tokens:
-        return results[0]
-    artist_first = artist_tokens[0]
+    artist_tokens = [t for t in artist_n.split() if t not in {"the", "and"}]
+    title_n = _normalize(title)
 
     def is_compilation(r: dict) -> bool:
-        coll = r.get("collectionName", "").lower()
+        coll = r.get("attributes", {}).get("albumName", "").lower()
         return any(h in coll for h in _COMPILATION_HINTS)
 
     def artist_matches_exactly(r: dict) -> bool:
-        return _normalize(r.get("artistName", "")) == artist_n
+        return _normalize(r.get("attributes", {}).get("artistName", "")) == artist_n
 
-    def artist_contains(r: dict) -> bool:
-        a = _normalize(r.get("artistName", ""))
-        return artist_first in a
+    def artist_overlap(r: dict) -> bool:
+        if not artist_tokens:
+            return False
+        a = _normalize(r.get("attributes", {}).get("artistName", ""))
+        a_tokens = set(a.split())
+        return any(t in a_tokens for t in artist_tokens)
 
-    def shortest(rs: list[dict]) -> Optional[dict]:
-        if not rs:
-            return None
-        return min(rs, key=lambda r: len(r.get("trackName", "")))
+    def title_matches_exactly(r: dict) -> bool:
+        return _normalize(r.get("attributes", {}).get("name", "")) == title_n
 
-    tier1 = [r for r in results if artist_matches_exactly(r) and not is_compilation(r)]
+    def has_version_suffix(r: dict) -> bool:
+        """Catches '(Live)', '(Remix)', '(Extended)', '(Album Version)', etc."""
+        name_n = _normalize(r.get("attributes", {}).get("name", ""))
+        return any(
+            marker in name_n
+            for marker in (
+                " live",
+                " remix",
+                " extended",
+                " instrumental",
+                " acoustic",
+                " demo",
+                " karaoke",
+                " edit",
+                " re recorded",
+                " rerecorded",
+                " remastered",
+                " mono",
+            )
+        )
+
+    def rank_within_tier(r: dict) -> tuple:
+        # Sort ascending: lower = better. Prefer exact title, non-version,
+        # non-compilation, then shorter title (as a tiebreaker for picking
+        # the canonical studio cut over extended/mixed versions).
+        return (
+            0 if title_matches_exactly(r) else 1,
+            1 if has_version_suffix(r) else 0,
+            1 if is_compilation(r) else 0,
+            len(r.get("attributes", {}).get("name", "")),
+        )
+
+    tier1 = [r for r in viable if artist_matches_exactly(r)]
     if tier1:
-        return shortest(tier1)
+        return _song_to_legacy_shape(min(tier1, key=rank_within_tier))
 
-    tier2 = [r for r in results if artist_matches_exactly(r)]
+    tier2 = [r for r in viable if artist_overlap(r)]
     if tier2:
-        return shortest(tier2)
+        return _song_to_legacy_shape(min(tier2, key=rank_within_tier))
 
-    tier3 = [r for r in results if artist_contains(r) and not is_compilation(r)]
-    if tier3:
-        return shortest(tier3)
-
-    return results[0]
+    # No artist overlap anywhere: safer to return None than a random same-title
+    # song by a different artist.
+    return None
 
 
 def canonical_url(result: dict) -> Optional[str]:
@@ -131,6 +222,6 @@ def canonical_url(result: dict) -> Optional[str]:
     url = result.get("trackViewUrl")
     if not url:
         return None
-    return url.split("?")[0] + (
-        f"?i={result['trackId']}" if result.get("trackId") else ""
-    )
+    base = url.split("?")[0]
+    tid = result.get("trackId")
+    return base + (f"?i={tid}" if tid else "")

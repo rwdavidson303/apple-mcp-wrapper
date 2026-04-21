@@ -130,6 +130,28 @@ def extract_catalog_song_id(url_or_id: str) -> str:
     raise ValueError(f"Could not extract catalog song ID from: {url_or_id!r}")
 
 
+def catalog_search_songs(
+    query: str,
+    limit: int = 25,
+    storefront: str = "us",
+) -> list[dict]:
+    """Search the Apple Music catalog for songs.
+
+    Uses /v1/catalog/{storefront}/search?types=songs. Returns the raw
+    song resources list (each with id, type, attributes.name, .artistName,
+    .albumName, .url). Unlike the iTunes Search API, this indexes the full
+    Apple Music catalog.
+    """
+    status, payload = _request(
+        "GET",
+        f"/v1/catalog/{storefront}/search",
+        query={"term": query, "types": "songs", "limit": max(1, min(int(limit), 25))},
+    )
+    if status != 200:
+        return []
+    return payload.get("results", {}).get("songs", {}).get("data", []) or []
+
+
 def add_song_to_library(catalog_song_id_or_url: str) -> dict:
     song_id = extract_catalog_song_id(catalog_song_id_or_url)
     status, payload = _request(
