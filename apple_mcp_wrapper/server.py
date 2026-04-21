@@ -12,7 +12,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from . import automation, catalog
+from . import automation, catalog, musickit
 
 mcp = FastMCP("apple-mcp-wrapper")
 
@@ -131,6 +131,74 @@ def bulk_add_catalog_tracks_to_library(tracks: list[dict]) -> list[dict]:
         List of result dicts, one per input track.
     """
     return automation.bulk_add_catalog_tracks_to_library(tracks)
+
+
+@mcp.tool()
+def add_to_library_musickit(catalog_song_id_or_url: str) -> dict:
+    """Add a catalog song to the user's library via the MusicKit REST API.
+
+    Reliable, no UI scripting. Requires MUSICKIT_DEVELOPER_TOKEN and
+    MUSICKIT_USER_TOKEN in the .env file at the repo root.
+
+    Args:
+        catalog_song_id_or_url: Either a bare catalog song ID (e.g. "217503074")
+            or any music.apple.com URL containing the song (the `?i=<id>`
+            query param or a trailing numeric path segment).
+
+    Returns:
+        {"ok": bool, "status": int, "catalog_song_id": str, "response": dict}
+    """
+    return musickit.add_song_to_library(catalog_song_id_or_url)
+
+
+@mcp.tool()
+def add_to_playlist_musickit(
+    catalog_song_id_or_url: str,
+    playlist_name: str,
+) -> dict:
+    """Add a catalog song to a named library playlist via MusicKit REST.
+
+    Looks up the playlist by exact name (case-insensitive) and posts the
+    catalog song to its /tracks endpoint. The song does not have to be in
+    the library first; the API accepts a catalog song ID directly.
+
+    Args:
+        catalog_song_id_or_url: Bare catalog song ID or a music.apple.com URL.
+        playlist_name: Exact playlist name in the user's library.
+
+    Returns:
+        {"ok": bool, "status": int, "catalog_song_id": str,
+         "playlist_id": str | None, "response": dict,
+         "error": str (only if playlist not found)}
+    """
+    playlist_id = musickit.find_library_playlist_id_by_name(playlist_name)
+    if playlist_id is None:
+        return {
+            "ok": False,
+            "error": f"No library playlist named {playlist_name!r} found",
+            "playlist_id": None,
+        }
+    return musickit.add_catalog_song_to_playlist(
+        catalog_song_id_or_url=catalog_song_id_or_url,
+        playlist_id=playlist_id,
+    )
+
+
+@mcp.tool()
+def list_library_playlists_musickit() -> list[dict]:
+    """List the user's library playlists via MusicKit REST.
+
+    Returns:
+        A list of dicts with id and name for each library playlist.
+    """
+    return [
+        {
+            "id": p.get("id"),
+            "name": p.get("attributes", {}).get("name", ""),
+            "can_edit": p.get("attributes", {}).get("canEdit", False),
+        }
+        for p in musickit.list_library_playlists()
+    ]
 
 
 def main() -> None:
