@@ -155,29 +155,54 @@ def add_catalog_track_to_library(
                 set sg to first UI element of window 1 whose role is "AXSplitGroup"
                 set mainSA to item 2 of (UI elements of sg whose role is "AXScrollArea")
                 set coll to first UI element of mainSA whose role is "AXList"
-                set sections to (UI elements of coll whose role is "AXList")
-                if (count of sections) < 2 then return "err: track list section not found"
-                set trackList to item 2 of sections
+                set sectionLists to (UI elements of coll whose role is "AXList")
+                if (count of sectionLists) < 2 then return "err: track list section not found"
+                set trackList to item 2 of sectionLists
                 set targetRow to missing value
-                repeat with r in (UI elements of trackList)
-                    try
-                        if (description of r) is {name_lit} then
-                            set targetRow to r
-                            exit repeat
-                        end if
-                    end try
-                end repeat
-                if targetRow is missing value then return "err: row not found for " & {name_lit}
+                set targetName to {name_lit}
+                set rowDescsStr to ""
+                ignoring case
+                    repeat with aRow in (UI elements of trackList)
+                        try
+                            set rowDesc to description of aRow
+                            set rowDescsStr to rowDescsStr & " | " & rowDesc
+                            if rowDesc = targetName then
+                                set targetRow to contents of aRow
+                                exit repeat
+                            end if
+                        end try
+                    end repeat
+                end ignoring
+                if targetRow is missing value then
+                    ignoring case
+                        repeat with aRow in (UI elements of trackList)
+                            try
+                                set rowDesc to description of aRow
+                                if rowDesc contains targetName then
+                                    set targetRow to contents of aRow
+                                    exit repeat
+                                end if
+                                if targetName contains rowDesc and (count of rowDesc) > 4 then
+                                    set targetRow to contents of aRow
+                                    exit repeat
+                                end if
+                            end try
+                        end repeat
+                    end ignoring
+                end if
+                if targetRow is missing value then
+                    return "err: row not found for " & targetName & " (rows:" & rowDescsStr & ")"
+                end if
                 set moreBtn to first UI element of targetRow whose role is "AXButton"
                 click moreBtn
                 delay 1.0
                 keystroke "add"
                 delay 0.4
-                key code 36 -- Return to activate "Add to Library"
+                key code 36
                 return "ok"
             on error errMsg
                 try
-                    key code 53 -- Escape to dismiss any open popup
+                    key code 53
                 end try
                 return "err: " & errMsg
             end try

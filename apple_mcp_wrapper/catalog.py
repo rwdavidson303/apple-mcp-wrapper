@@ -54,35 +54,74 @@ def _normalize(s: str) -> str:
     )
 
 
+_COMPILATION_HINTS = (
+    "various artists",
+    "deeply rooted",
+    "now that's what i call",
+    "greatest slow jams",
+    "ultimate r&b",
+    "100 greatest",
+    "love songs collection",
+    "hits collection",
+    "essential r&b",
+    "the best of r&b",
+)
+
+
 def find_best_match(
     artist: str,
     title: str,
-    limit: int = 10,
+    limit: int = 25,
     country: str = "us",
 ) -> Optional[dict]:
     """Search for a specific artist + title and return the closest catalog match.
 
-    Ranks matches by requiring the first token of each field to appear in the
-    result's corresponding field (after loose normalization). Falls back to the
-    top-ranked raw result if no strict match is found.
+    Preference tiers:
+      1. Exact artist match (case/punctuation-insensitive), not a compilation.
+      2. Exact artist match, compilation ok.
+      3. Artist first-token present in result's artistName, not a compilation.
+      4. Fallback: top raw result.
+
+    Within a tier, prefer the shortest track title (to avoid live / extended /
+    remix cuts when the canonical studio version exists).
     """
     results = search(f"{artist} {title}", limit=limit, country=country)
     if not results:
         return None
 
-    artist_tokens = _normalize(artist).split()
-    title_tokens = _normalize(title).split()
-    if not artist_tokens or not title_tokens:
+    artist_n = _normalize(artist)
+    artist_tokens = artist_n.split()
+    if not artist_tokens:
         return results[0]
-
     artist_first = artist_tokens[0]
-    title_first = title_tokens[0]
 
-    for r in results:
+    def is_compilation(r: dict) -> bool:
+        coll = r.get("collectionName", "").lower()
+        return any(h in coll for h in _COMPILATION_HINTS)
+
+    def artist_matches_exactly(r: dict) -> bool:
+        return _normalize(r.get("artistName", "")) == artist_n
+
+    def artist_contains(r: dict) -> bool:
         a = _normalize(r.get("artistName", ""))
-        t = _normalize(r.get("trackName", ""))
-        if artist_first in a and title_first in t:
-            return r
+        return artist_first in a
+
+    def shortest(rs: list[dict]) -> Optional[dict]:
+        if not rs:
+            return None
+        return min(rs, key=lambda r: len(r.get("trackName", "")))
+
+    tier1 = [r for r in results if artist_matches_exactly(r) and not is_compilation(r)]
+    if tier1:
+        return shortest(tier1)
+
+    tier2 = [r for r in results if artist_matches_exactly(r)]
+    if tier2:
+        return shortest(tier2)
+
+    tier3 = [r for r in results if artist_contains(r) and not is_compilation(r)]
+    if tier3:
+        return shortest(tier3)
 
     return results[0]
 
