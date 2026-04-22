@@ -141,15 +141,26 @@ def catalog_search_songs(
     song resources list (each with id, type, attributes.name, .artistName,
     .albumName, .url). Unlike the iTunes Search API, this indexes the full
     Apple Music catalog.
+
+    Retries on 429 (rate limit) and 5xx with exponential backoff, since
+    bulk runs can briefly exceed Apple's rate ceiling.
     """
-    status, payload = _request(
-        "GET",
-        f"/v1/catalog/{storefront}/search",
-        query={"term": query, "types": "songs", "limit": max(1, min(int(limit), 25))},
-    )
-    if status != 200:
+    import time as _time
+    delays = [0.5, 1.5, 4.0]
+    for attempt, delay in enumerate([0.0] + delays):
+        if delay:
+            _time.sleep(delay)
+        status, payload = _request(
+            "GET",
+            f"/v1/catalog/{storefront}/search",
+            query={"term": query, "types": "songs", "limit": max(1, min(int(limit), 25))},
+        )
+        if status == 200:
+            return payload.get("results", {}).get("songs", {}).get("data", []) or []
+        if status == 429 or 500 <= status < 600:
+            continue
         return []
-    return payload.get("results", {}).get("songs", {}).get("data", []) or []
+    return []
 
 
 def add_song_to_library(catalog_song_id_or_url: str) -> dict:

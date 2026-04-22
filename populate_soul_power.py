@@ -2,12 +2,18 @@
 
 v0.2 rewrite: replaces the UI-scripting path (which topped out at ~30% on
 popular Motown/Stax tracks) with direct api.music.apple.com calls. Each
-track needs one catalog lookup (iTunes Search API, no auth) plus two
+track needs one catalog lookup (MusicKit catalog search) plus two
 authenticated REST POSTs (library add, playlist add). Dedupes against the
 playlist's existing tracks so re-runs are safe.
+
+Run with `--dry-run` to resolve every target and print what WOULD be
+added without writing anything. Always do a dry run first on a new list
+so matcher mistakes (wrong track, no-match) are caught before they
+pollute the library.
 """
 from __future__ import annotations
 
+import argparse
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -235,6 +241,7 @@ def process(
     playlist_id: str,
     existing_catalog_ids: set[str],
     existing_pairs: set[tuple[str, str]],
+    dry_run: bool = False,
 ) -> Result:
     category, artist, title = target
     r = Result(category=category, artist=artist, title=title)
@@ -257,6 +264,12 @@ def process(
         r.status = "already-in-playlist"
         return r
 
+    if dry_run:
+        existing_catalog_ids.add(r.catalog_song_id)
+        existing_pairs.add(pair)
+        r.status = "would-add"
+        return r
+
     lib_result = musickit.add_song_to_library(r.catalog_song_id)
     if not lib_result.get("ok"):
         r.status = "library-add-failed"
@@ -276,10 +289,22 @@ def process(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve every target and print what would be added, but "
+        "make no library or playlist changes. Use this first on any new "
+        "target list to verify matcher resolutions before writing.",
+    )
+    args = parser.parse_args()
+
     playlist_id = musickit.find_library_playlist_id_by_name(PLAYLIST)
     if not playlist_id:
         raise SystemExit(f"Playlist not found: {PLAYLIST!r}")
     print(f"Playlist id: {playlist_id}")
+    if args.dry_run:
+        print("*** DRY RUN: no writes will occur ***")
 
     existing_catalog_ids, existing_pairs = load_playlist_index(playlist_id)
     print(f"Existing tracks in playlist: {len(existing_pairs)}")
@@ -290,7 +315,13 @@ def main() -> None:
         artist, title = target[1], target[2]
         print(f"[{i:3d}/{len(TARGETS)}] {artist} - {title}")
         try:
-            r = process(target, playlist_id, existing_catalog_ids, existing_pairs)
+            r = process(
+                target,
+                playlist_id,
+                existing_catalog_ids,
+                existing_pairs,
+                dry_run=args.dry_run,
+            )
         except Exception as e:
             r = Result(
                 category=target[0], artist=artist, title=title, status=f"exception: {e}"
@@ -299,6 +330,8 @@ def main() -> None:
         extra = ""
         if r.resolved_title and r.resolved_title != title:
             extra = f", resolved={r.resolved_title}"
+        if r.resolved_artist and r.resolved_artist.strip().lower() != artist.strip().lower():
+            extra += f", resolved_artist={r.resolved_artist}"
         print(f"    -> {r.status}{extra}")
         time.sleep(0.15)
 
@@ -312,9 +345,14 @@ def main() -> None:
             label = f"{r.artist} - {r.title}"
             if r.resolved_title and r.resolved_title != r.title:
                 label += f" (resolved: {r.resolved_title})"
+            if r.resolved_artist and r.resolved_artist.strip().lower() != r.artist.strip().lower():
+                label += f" (by {r.resolved_artist})"
             if r.notes:
                 label += f"  [{'; '.join(r.notes)}]"
             print(f"  - {label}")
+
+    if args.dry_run:
+        print("\n*** DRY RUN complete. Re-run without --dry-run to actually write. ***")
 
 
 if __name__ == "__main__":
