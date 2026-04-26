@@ -4,8 +4,8 @@ link to open in Music and adds via the '+' button.
 """
 from __future__ import annotations
 
+import asyncio
 import subprocess
-import time
 import urllib.request
 from collections import defaultdict
 
@@ -104,7 +104,7 @@ def add_hyperlink(paragraph, url, text):
     paragraph._p.append(hyperlink)
 
 
-def main() -> None:
+async def main() -> None:
     have = playlist_track_keys()
     print(f"Already in playlist: {len(have)} tracks")
 
@@ -125,16 +125,16 @@ def main() -> None:
     for (category, artist, title) in TARGETS:
         for attempt in range(3):
             try:
-                r = catalog.find_best_match(artist, title)
+                r = await catalog.find_best_match(artist, title)
                 break
             except Exception as e:
                 if "429" in str(e) and attempt < 2:
-                    time.sleep(10)
+                    await asyncio.sleep(10)
                     continue
                 print(f"search-err: {artist} - {title}: {e}")
                 r = None
                 break
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
         if not r:
             no_match_count += 1
             print(f"no-match: {artist} - {title}")
@@ -177,4 +177,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

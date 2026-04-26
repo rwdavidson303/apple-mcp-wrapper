@@ -14,7 +14,7 @@ pollute the library.
 from __future__ import annotations
 
 import argparse
-import time
+import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -192,7 +192,7 @@ def _norm(s: str) -> str:
     )
 
 
-def load_playlist_index(playlist_id: str) -> tuple[set[str], set[tuple[str, str]]]:
+async def load_playlist_index(playlist_id: str) -> tuple[set[str], set[tuple[str, str]]]:
     """Return (catalog_ids_in_playlist, (artist_norm, title_norm) pairs).
 
     Uses the playlist-with-include-tracks endpoint and follows `next`
@@ -201,7 +201,7 @@ def load_playlist_index(playlist_id: str) -> tuple[set[str], set[tuple[str, str]
     form.
     """
     import urllib.parse
-    status, payload = musickit._request(
+    status, payload = await musickit._request(
         "GET",
         f"/v1/me/library/playlists/{playlist_id}",
         query={"include": "tracks"},
@@ -213,7 +213,7 @@ def load_playlist_index(playlist_id: str) -> tuple[set[str], set[tuple[str, str]
     nxt = rels.get("next")
     while nxt:
         p = urllib.parse.urlparse(nxt)
-        s, py = musickit._request(
+        s, py = await musickit._request(
             "GET", p.path, query=dict(urllib.parse.parse_qsl(p.query))
         )
         if s != 200:
@@ -236,7 +236,7 @@ def load_playlist_index(playlist_id: str) -> tuple[set[str], set[tuple[str, str]
     return catalog_ids, pairs
 
 
-def process(
+async def process(
     target: tuple[str, str, str],
     playlist_id: str,
     existing_catalog_ids: set[str],
@@ -246,7 +246,7 @@ def process(
     category, artist, title = target
     r = Result(category=category, artist=artist, title=title)
 
-    match = catalog.find_best_match(artist, title)
+    match = await catalog.find_best_match(artist, title)
     if not match:
         r.status = "no-catalog-match"
         return r
@@ -270,13 +270,13 @@ def process(
         r.status = "would-add"
         return r
 
-    lib_result = musickit.add_song_to_library(r.catalog_song_id)
+    lib_result = await musickit.add_song_to_library(r.catalog_song_id)
     if not lib_result.get("ok"):
         r.status = "library-add-failed"
         r.notes.append(f"status={lib_result.get('status')} resp={lib_result.get('response')}")
         return r
 
-    pl_result = musickit.add_catalog_song_to_playlist(r.catalog_song_id, playlist_id)
+    pl_result = await musickit.add_catalog_song_to_playlist(r.catalog_song_id, playlist_id)
     if not pl_result.get("ok"):
         r.status = "playlist-add-failed"
         r.notes.append(f"status={pl_result.get('status')} resp={pl_result.get('response')}")
@@ -288,7 +288,7 @@ def process(
     return r
 
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dry-run",
@@ -299,14 +299,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    playlist_id = musickit.find_library_playlist_id_by_name(PLAYLIST)
+    playlist_id = await musickit.find_library_playlist_id_by_name(PLAYLIST)
     if not playlist_id:
         raise SystemExit(f"Playlist not found: {PLAYLIST!r}")
     print(f"Playlist id: {playlist_id}")
     if args.dry_run:
         print("*** DRY RUN: no writes will occur ***")
 
-    existing_catalog_ids, existing_pairs = load_playlist_index(playlist_id)
+    existing_catalog_ids, existing_pairs = await load_playlist_index(playlist_id)
     print(f"Existing tracks in playlist: {len(existing_pairs)}")
     print()
 
@@ -315,7 +315,7 @@ def main() -> None:
         artist, title = target[1], target[2]
         print(f"[{i:3d}/{len(TARGETS)}] {artist} - {title}")
         try:
-            r = process(
+            r = await process(
                 target,
                 playlist_id,
                 existing_catalog_ids,
@@ -333,7 +333,7 @@ def main() -> None:
         if r.resolved_artist and r.resolved_artist.strip().lower() != artist.strip().lower():
             extra += f", resolved_artist={r.resolved_artist}"
         print(f"    -> {r.status}{extra}")
-        time.sleep(0.15)
+        await asyncio.sleep(0.15)
 
     print("\n=== SUMMARY ===")
     buckets: dict[str, list[Result]] = {}
@@ -356,4 +356,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

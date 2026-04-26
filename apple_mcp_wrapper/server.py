@@ -18,7 +18,7 @@ mcp = FastMCP("apple-mcp-wrapper")
 
 
 @mcp.tool()
-def catalog_search(query: str, limit: int = 10, country: str = "us") -> list[dict]:
+async def catalog_search(query: str, limit: int = 10, country: str = "us") -> list[dict]:
     """Search the Apple Music catalog (not your library) via the iTunes Search API.
 
     Args:
@@ -30,11 +30,11 @@ def catalog_search(query: str, limit: int = 10, country: str = "us") -> list[dic
         A list of track metadata dicts with fields including trackName,
         artistName, collectionName, trackViewUrl, previewUrl, trackId.
     """
-    return catalog.search(query=query, limit=limit, country=country)
+    return await catalog.search(query=query, limit=limit, country=country)
 
 
 @mcp.tool()
-def catalog_find_best_match(
+async def catalog_find_best_match(
     artist: str,
     title: str,
     limit: int = 10,
@@ -51,7 +51,7 @@ def catalog_find_best_match(
     Returns:
         The best match result dict, or None if no catalog results were found.
     """
-    return catalog.find_best_match(
+    return await catalog.find_best_match(
         artist=artist, title=title, limit=limit, country=country
     )
 
@@ -134,7 +134,7 @@ def bulk_add_catalog_tracks_to_library(tracks: list[dict]) -> list[dict]:
 
 
 @mcp.tool()
-def add_to_library_musickit(catalog_song_id_or_url: str) -> dict:
+async def add_to_library_musickit(catalog_song_id_or_url: str) -> dict:
     """Add a catalog song to the user's library via the MusicKit REST API.
 
     Reliable, no UI scripting. Requires MUSICKIT_DEVELOPER_TOKEN and
@@ -148,11 +148,11 @@ def add_to_library_musickit(catalog_song_id_or_url: str) -> dict:
     Returns:
         {"ok": bool, "status": int, "catalog_song_id": str, "response": dict}
     """
-    return musickit.add_song_to_library(catalog_song_id_or_url)
+    return await musickit.add_song_to_library(catalog_song_id_or_url)
 
 
 @mcp.tool()
-def add_to_playlist_musickit(
+async def add_to_playlist_musickit(
     catalog_song_id_or_url: str,
     playlist_name: str,
 ) -> dict:
@@ -171,21 +171,21 @@ def add_to_playlist_musickit(
          "playlist_id": str | None, "response": dict,
          "error": str (only if playlist not found)}
     """
-    playlist_id = musickit.find_library_playlist_id_by_name(playlist_name)
+    playlist_id = await musickit.find_library_playlist_id_by_name(playlist_name)
     if playlist_id is None:
         return {
             "ok": False,
             "error": f"No library playlist named {playlist_name!r} found",
             "playlist_id": None,
         }
-    return musickit.add_catalog_song_to_playlist(
+    return await musickit.add_catalog_song_to_playlist(
         catalog_song_id_or_url=catalog_song_id_or_url,
         playlist_id=playlist_id,
     )
 
 
 @mcp.tool()
-def list_library_playlists_musickit() -> list[dict]:
+async def list_library_playlists_musickit() -> list[dict]:
     """List the user's library playlists via MusicKit REST.
 
     Returns:
@@ -197,7 +197,7 @@ def list_library_playlists_musickit() -> list[dict]:
             "name": p.get("attributes", {}).get("name", ""),
             "can_edit": p.get("attributes", {}).get("canEdit", False),
         }
-        for p in musickit.list_library_playlists()
+        for p in await musickit.list_library_playlists()
     ]
 
 

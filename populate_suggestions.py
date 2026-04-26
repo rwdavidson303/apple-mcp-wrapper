@@ -11,8 +11,8 @@ Prints a running log and a final summary.
 """
 from __future__ import annotations
 
+import asyncio
 import subprocess
-import time
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -163,11 +163,11 @@ def add_to_playlist_applescript(track_name: str, artist: str, playlist: str) -> 
     return result.stdout.strip() or result.stderr.strip()
 
 
-def process(target: tuple[str, str, str]) -> Result:
+async def process(target: tuple[str, str, str]) -> Result:
     category, artist, title = target
     r = Result(category=category, artist=artist, title=title)
 
-    match = catalog.find_best_match(artist, title)
+    match = await catalog.find_best_match(artist, title)
     if not match:
         r.status = "no-catalog-match"
         r.notes.append("iTunes search returned nothing")
@@ -193,7 +193,7 @@ def process(target: tuple[str, str, str]) -> Result:
         for attempt in range(3):
             if not ensure_music_window():
                 r.notes.append(f"attempt {attempt+1}: Music window unreachable")
-                time.sleep(1.5)
+                await asyncio.sleep(1.5)
                 continue
             add_result = automation.add_catalog_track_to_library(
                 url=r.url,
@@ -208,7 +208,7 @@ def process(target: tuple[str, str, str]) -> Result:
                 if r.in_library:
                     break
             r.notes.append(f"attempt {attempt+1}: {last_msg}")
-            time.sleep(1.5)
+            await asyncio.sleep(1.5)
         if not r.in_library:
             r.status = "library-add-failed"
             return r
@@ -226,13 +226,13 @@ def process(target: tuple[str, str, str]) -> Result:
     return r
 
 
-def main() -> None:
+async def main() -> None:
     results: list[Result] = []
     for i, target in enumerate(TARGETS, 1):
         category, artist, title = target
         print(f"[{i:2d}/{len(TARGETS)}] {artist} - {title}")
         try:
-            r = process(target)
+            r = await process(target)
         except Exception as e:
             r = Result(category=category, artist=artist, title=title, status=f"exception: {e}")
         results.append(r)
@@ -241,7 +241,7 @@ def main() -> None:
         if r.notes:
             for n in r.notes:
                 print(f"      note: {n}")
-        time.sleep(0.4)
+        await asyncio.sleep(0.4)
 
     print("\n=== SUMMARY ===")
     buckets: dict[str, list[Result]] = {}
@@ -257,4 +257,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

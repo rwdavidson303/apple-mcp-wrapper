@@ -9,17 +9,16 @@ unrelated song when the requested track isn't found.
 from __future__ import annotations
 
 import difflib
-import json
-import urllib.parse
-import urllib.request
 from typing import Optional
+
+import httpx
 
 from . import musickit
 
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 
 
-def search(query: str, limit: int = 10, country: str = "us") -> list[dict]:
+async def search(query: str, limit: int = 10, country: str = "us") -> list[dict]:
     """Search the Apple Music catalog.
 
     Parameters
@@ -42,9 +41,9 @@ def search(query: str, limit: int = 10, country: str = "us") -> list[dict]:
         "limit": max(1, min(int(limit), 200)),
         "country": country,
     }
-    url = f"{ITUNES_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-    with urllib.request.urlopen(url, timeout=10) as resp:
-        data = json.load(resp)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(ITUNES_SEARCH_URL, params=params)
+    data = resp.json()
     return data.get("results", [])
 
 
@@ -117,7 +116,7 @@ def _song_to_legacy_shape(r: dict) -> dict:
     }
 
 
-def find_best_match(
+async def find_best_match(
     artist: str,
     title: str,
     limit: int = 25,
@@ -137,7 +136,7 @@ def find_best_match(
       4. Artist first-token contained in result's artistName, non-compilation.
       5. Top remaining viable result.
     """
-    results = musickit.catalog_search_songs(
+    results = await musickit.catalog_search_songs(
         f"{artist} {title}", limit=limit, storefront=country
     )
     if not results:

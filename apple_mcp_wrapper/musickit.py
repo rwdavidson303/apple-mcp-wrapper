@@ -7,16 +7,21 @@ player. Both tokens live in a gitignored .env file at the repo root.
 The web-player Developer Token's root_https_origin is pinned to apple.com,
 so every request includes Origin and Referer headers to match. Without
 those headers the API returns 401.
+
+All HTTP calls are async (httpx.AsyncClient) so asyncio cancellation
+propagates correctly. Sync urllib calls used to block FastMCP threadpool
+workers, leaving in-flight requests running after a user-cancel and
+killing the stdio transport with late responses.
 """
 from __future__ import annotations
 
-import json
+import asyncio
 import os
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Optional
+
+import httpx
 
 API_BASE = "https://api.music.apple.com"
 ORIGIN = "https://music.apple.com"
@@ -70,7 +75,7 @@ def _credentials() -> tuple[str, str]:
     return dev, user
 
 
-def _request(
+async def _request(
     method: str,
     path: str,
     *,
@@ -78,10 +83,6 @@ def _request(
     body: Optional[dict] = None,
 ) -> tuple[int, dict]:
     dev, user = _credentials()
-    url = f"{API_BASE}{path}"
-    if query:
-        url = f"{url}?{urllib.parse.urlencode(query, doseq=True)}"
-    data_bytes = None
     headers = {
         "Authorization": f"Bearer {dev}",
         "Music-User-Token": user,
@@ -90,21 +91,20 @@ def _request(
         "Accept": "application/json",
     }
     if body is not None:
-        data_bytes = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
+    async with httpx.AsyncClient(base_url=API_BASE, timeout=15.0) as client:
+        resp = await client.request(
+            method,
+            path,
+            params=query,
+            json=body,
+            headers=headers,
+        )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            status = resp.status
-            raw = resp.read()
-    except urllib.error.HTTPError as e:
-        raw = e.read() if hasattr(e, "read") else b""
-        status = e.code
-    try:
-        payload = json.loads(raw) if raw else {}
-    except json.JSONDecodeError:
-        payload = {"_raw": raw.decode("utf-8", errors="replace")}
-    return status, payload
+        payload = resp.json() if resp.content else {}
+    except ValueError:
+        payload = {"_raw": resp.text}
+    return resp.status_code, payload
 
 
 def extract_catalog_song_id(url_or_id: str) -> str:
@@ -130,7 +130,7 @@ def extract_catalog_song_id(url_or_id: str) -> str:
     raise ValueError(f"Could not extract catalog song ID from: {url_or_id!r}")
 
 
-def catalog_search_songs(
+async def catalog_search_songs(
     query: str,
     limit: int = 25,
     storefront: str = "us",
@@ -145,12 +145,11 @@ def catalog_search_songs(
     Retries on 429 (rate limit) and 5xx with exponential backoff, since
     bulk runs can briefly exceed Apple's rate ceiling.
     """
-    import time as _time
     delays = [0.5, 1.5, 4.0]
-    for attempt, delay in enumerate([0.0] + delays):
+    for delay in [0.0] + delays:
         if delay:
-            _time.sleep(delay)
-        status, payload = _request(
+            await asyncio.sleep(delay)
+        status, payload = await _request(
             "GET",
             f"/v1/catalog/{storefront}/search",
             query={"term": query, "types": "songs", "limit": max(1, min(int(limit), 25))},
@@ -163,9 +162,9 @@ def catalog_search_songs(
     return []
 
 
-def add_song_to_library(catalog_song_id_or_url: str) -> dict:
+async def add_song_to_library(catalog_song_id_or_url: str) -> dict:
     song_id = extract_catalog_song_id(catalog_song_id_or_url)
-    status, payload = _request(
+    status, payload = await _request(
         "POST",
         "/v1/me/library",
         query={"ids[songs]": song_id},
@@ -179,12 +178,12 @@ def add_song_to_library(catalog_song_id_or_url: str) -> dict:
     }
 
 
-def list_library_playlists() -> list[dict]:
+async def list_library_playlists() -> list[dict]:
     out: list[dict] = []
     path = "/v1/me/library/playlists"
     query: Optional[dict] = {"limit": 100}
     while True:
-        status, payload = _request("GET", path, query=query)
+        status, payload = await _request("GET", path, query=query)
         if status != 200:
             raise RuntimeError(
                 f"list_library_playlists failed ({status}): {payload}"
@@ -199,21 +198,21 @@ def list_library_playlists() -> list[dict]:
     return out
 
 
-def find_library_playlist_id_by_name(name: str) -> Optional[str]:
+async def find_library_playlist_id_by_name(name: str) -> Optional[str]:
     target = name.strip().lower()
-    for p in list_library_playlists():
+    for p in await list_library_playlists():
         pname = p.get("attributes", {}).get("name", "")
         if pname.strip().lower() == target:
             return p.get("id")
     return None
 
 
-def add_catalog_song_to_playlist(
+async def add_catalog_song_to_playlist(
     catalog_song_id_or_url: str,
     playlist_id: str,
 ) -> dict:
     song_id = extract_catalog_song_id(catalog_song_id_or_url)
-    status, payload = _request(
+    status, payload = await _request(
         "POST",
         f"/v1/me/library/playlists/{playlist_id}/tracks",
         body={"data": [{"id": song_id, "type": "songs"}]},
