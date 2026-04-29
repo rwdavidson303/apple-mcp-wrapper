@@ -158,7 +158,7 @@ async def process_playlist(spec: dict, dry_run: bool) -> dict:
         except Exception as e:
             summary["exception"].append(f"{label}  [{e}]")
             print(f"    -> exception: {e}")
-        await asyncio.sleep(0.18)
+        await asyncio.sleep(1.0)
     return summary
 
 
