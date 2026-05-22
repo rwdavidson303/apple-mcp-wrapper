@@ -13,6 +13,7 @@ authors = [{ name = "Richard W. Davidson" }]
 dependencies = [
     "mcp>=1.0.0",
     "httpx>=0.27",
+    "pyjwt[crypto]>=2.8",
 ]
 
 [project.optional-dependencies]

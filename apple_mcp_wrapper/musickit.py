@@ -1,33 +1,43 @@
 """MusicKit API client for reliable library and playlist writes.
 
-Uses the public api.music.apple.com REST endpoints with a Developer Token
-extracted from music.apple.com and a Music User Token from the same web
-player. Both tokens live in a gitignored .env file at the repo root.
+Uses the public api.music.apple.com REST endpoints.
 
-The web-player Developer Token's root_https_origin is pinned to apple.com,
-so every request includes Origin and Referer headers to match. Without
-those headers the API returns 401.
+Authentication has two modes:
+  1. Self-signed Developer Token (preferred). Signs an ES256 JWT from a
+     MusicKit private key (.p8) issued by the Apple Developer portal.
+     Valid up to 180 days; auto-refreshes 24h before expiry.
+  2. Web-player Developer Token (fallback). JWT extracted from
+     music.apple.com. Rotates every ~3 months and requires Origin and
+     Referer headers pinned to music.apple.com.
+
+Both modes pair with a Music User Token (Music-User-Token header) for
+library writes.
 
 All HTTP calls are async (httpx.AsyncClient) so asyncio cancellation
-propagates correctly. Sync urllib calls used to block FastMCP threadpool
-workers, leaving in-flight requests running after a user-cancel and
-killing the stdio transport with late responses.
+propagates correctly.
 """
 from __future__ import annotations
 
 import asyncio
 import os
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Optional
 
 import httpx
+import jwt
 
 API_BASE = "https://api.music.apple.com"
 ORIGIN = "https://music.apple.com"
 REFERER = "https://music.apple.com/"
 
+# Self-signed tokens last 180 days max per Apple. Refresh when <24h remains.
+_SIGNED_TOKEN_TTL_SECONDS = 180 * 24 * 60 * 60
+_SIGNED_TOKEN_REFRESH_MARGIN = 24 * 60 * 60
+
 _CREDS_CACHE: dict[str, str] | None = None
+_SIGNED_TOKEN_CACHE: dict[str, float | str] | None = None
 
 
 def _repo_root() -> Path:
@@ -49,30 +59,85 @@ def _load_env_file(path: Path) -> dict[str, str]:
     return out
 
 
-def _credentials() -> tuple[str, str]:
+def _sign_developer_token(team_id: str, key_id: str, private_key_pem: str) -> str:
+    now = int(time.time())
+    payload = {
+        "iss": team_id,
+        "iat": now,
+        "exp": now + _SIGNED_TOKEN_TTL_SECONDS,
+    }
+    headers = {"alg": "ES256", "kid": key_id}
+    token = jwt.encode(payload, private_key_pem, algorithm="ES256", headers=headers)
+    return token if isinstance(token, str) else token.decode("utf-8")
+
+
+def _get_signed_developer_token(creds: dict[str, str]) -> Optional[str]:
+    """Return a cached or freshly-signed Developer Token, or None if signing
+    is not configured. Auto-refreshes when within 24h of expiry."""
+    global _SIGNED_TOKEN_CACHE
+    team_id = creds.get("team_id", "")
+    key_id = creds.get("key_id", "")
+    key_path = creds.get("key_path", "")
+    if not (team_id and key_id and key_path):
+        return None
+    now = time.time()
+    if (
+        _SIGNED_TOKEN_CACHE
+        and _SIGNED_TOKEN_CACHE.get("key_id") == key_id
+        and float(_SIGNED_TOKEN_CACHE["exp"]) - now > _SIGNED_TOKEN_REFRESH_MARGIN
+    ):
+        return str(_SIGNED_TOKEN_CACHE["token"])
+    p8_path = Path(key_path)
+    if not p8_path.is_absolute():
+        p8_path = _repo_root() / key_path
+    if not p8_path.exists():
+        return None
+    pem = p8_path.read_text()
+    token = _sign_developer_token(team_id, key_id, pem)
+    _SIGNED_TOKEN_CACHE = {
+        "key_id": key_id,
+        "token": token,
+        "exp": now + _SIGNED_TOKEN_TTL_SECONDS,
+    }
+    return token
+
+
+def _credentials() -> tuple[str, str, bool]:
+    """Return (developer_token, user_token, is_signed).
+
+    `is_signed` is True when the developer token is self-signed from the .p8.
+    Web-player tokens require Origin/Referer headers; signed tokens do not.
+    """
     global _CREDS_CACHE
     if _CREDS_CACHE is None:
         env_path = _repo_root() / ".env"
         file_vals = _load_env_file(env_path)
+
+        def _pick(key: str) -> str:
+            return os.environ.get(key) or file_vals.get(key, "")
+
         _CREDS_CACHE = {
-            "dev": os.environ.get("MUSICKIT_DEVELOPER_TOKEN")
-            or file_vals.get("MUSICKIT_DEVELOPER_TOKEN", ""),
-            "user": os.environ.get("MUSICKIT_USER_TOKEN")
-            or file_vals.get("MUSICKIT_USER_TOKEN", ""),
+            "dev": _pick("MUSICKIT_DEVELOPER_TOKEN"),
+            "user": _pick("MUSICKIT_USER_TOKEN"),
+            "team_id": _pick("MUSICKIT_TEAM_ID"),
+            "key_id": _pick("MUSICKIT_KEY_ID"),
+            "key_path": _pick("MUSICKIT_PRIVATE_KEY_PATH"),
         }
-    dev = _CREDS_CACHE["dev"]
+    signed = _get_signed_developer_token(_CREDS_CACHE)
+    dev = signed or _CREDS_CACHE["dev"]
     user = _CREDS_CACHE["user"]
     if not dev or dev.startswith("PASTE_"):
         raise RuntimeError(
-            "MUSICKIT_DEVELOPER_TOKEN is not set. Paste it into .env "
-            "or export it as an environment variable."
+            "No MusicKit Developer Token available. Either set "
+            "MUSICKIT_TEAM_ID + MUSICKIT_KEY_ID + MUSICKIT_PRIVATE_KEY_PATH "
+            "for self-signed tokens, or paste MUSICKIT_DEVELOPER_TOKEN."
         )
     if not user or user.startswith("PASTE_"):
         raise RuntimeError(
             "MUSICKIT_USER_TOKEN is not set. Paste it into .env "
             "or export it as an environment variable."
         )
-    return dev, user
+    return dev, user, signed is not None
 
 
 async def _request(
@@ -82,14 +147,16 @@ async def _request(
     query: Optional[dict] = None,
     body: Optional[dict] = None,
 ) -> tuple[int, dict]:
-    dev, user = _credentials()
+    dev, user, is_signed = _credentials()
     headers = {
         "Authorization": f"Bearer {dev}",
         "Music-User-Token": user,
-        "Origin": ORIGIN,
-        "Referer": REFERER,
         "Accept": "application/json",
     }
+    if not is_signed:
+        # Web-player token requires its root_https_origin to match.
+        headers["Origin"] = ORIGIN
+        headers["Referer"] = REFERER
     if body is not None:
         headers["Content-Type"] = "application/json"
     async with httpx.AsyncClient(base_url=API_BASE, timeout=15.0) as client:
